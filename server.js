@@ -420,12 +420,12 @@ function Trails(trail, search_query) {
   this.location = trail.location;
   this.length = trail.length;
   this.stars = trail.stars;
-  this.star_votes = trail.star_votes;
+  this.star_votes = trail.starVotes;
   this.summary = trail.summary;
   this.trail_url = trail.url;
-  this.conditions = trail.conditions;
-  this.condition_date = trail.condition_date;
-  this.condition_time = trail.condition_time;
+  this.conditions = trail.conditionDetails;
+  this.condition_date = trail.conditionDate.slice(0, 10);
+  this.condition_time = trail.conditionDate.slice(11,19);
   this.created_at = new Date().getTime();
   this.search_query = search_query;
 }
@@ -444,7 +444,7 @@ Trails.fetchTrails = (locationObject) => {
     .then( data => {
       if (!data.body) throw 'No Data';
       else {
-        let trailData = data.body.map( item => {
+        let trailData = data.trails.map( item => {
           let trails = new Meetups(item, locationObject.search_query);
           trails.save();
           return trails;
