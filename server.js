@@ -28,6 +28,7 @@ app.get('/weather', getWeather);
 app.get('/yelp', getRestaurants);
 app.get('/movies', getMovies);
 app.get('/meetups', getMeetups);
+app.get('/trails', getTrails);
 
 function getLocation(request, response) {
   const locationHandler = {
@@ -393,22 +394,111 @@ Meetups.lookUpMeetups = (handler) => {
     .catch(console.error);
 }
 
+////////////TRAILS///////////////
+
+
+function getTrails(request, response) {
+  const handler = {
+    search_query: request.query.data.search_query,
+
+    cacheHit: (result) => {
+      response.send(result.rows);
+    },
+
+    cacheMiss: () => {
+      Trails.fetchTrails(request.query.data)
+        .then(data => response.send(data))
+        .catch(console.error);
+    }
+  }
+
+  Trails.lookUpTrails(handler);
+}
+
+function Trails(trail, search_query) {
+  this.name = trail.name;
+  this.location = trail.location;
+  this.length = trail.length;
+  this.stars = trail.stars;
+  this.star_votes = trail.star_votes;
+  this.summary = trail.summary;
+  this.trail_url = trail.url;
+  this.conditions = trail.conditions;
+  this.condition_date = trail.condition_date;
+  this.condition_time = trail.condition_time;
+  this.created_at = new Date().getTime();
+  this.search_query = search_query;
+}
+
+Trails.prototype.save = function () {
+  let SQL = `INSERT INTO trails(name, location, length, stars, star_votes, summary, trail_url, conditions, condition_date, condition_time, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+  let values = Object.values(this);
+
+  client.query(SQL,values);
+}
+
+Trails.fetchTrails = (locationObject) => {
+  const URL = `https://www.hikingproject.com/data/get-trails?lat=${locationObject.latitude}&lon=${locationObject.longitude}&key=${process.env.TRAILS_API_KEY}`
+  console.log('the URL is ' + URL);
+  return superagent.get(URL)
+    .then( data => {
+      if (!data.body) throw 'No Data';
+      else {
+        let trailData = data.body.map( item => {
+          let trails = new Meetups(item, locationObject.search_query);
+          trails.save();
+          return trails;
+        })
+        return trailData;
+      }
+    })
+}
+
+Trails.lookUpTrails = (handler) => {
+  const SQL = `SELECT * FROM trails WHERE search_query=$1;`
+  const values = [handler.search_query];
+
+  return client.query(SQL, values)
+    .then((results) => {
+      if (results.rowCount > 0) {
+        console.log('got Trails data from database');
+        handler.cacheHit(results);
+      } else {
+        console.log('got Trails data from API');
+        handler.cacheMiss();
+      }
+    })
+    .catch(console.error);
+}
+
+
 // [
 //   {
-//     "link": "https://www.meetup.com/seattlejshackers/events/253823797/",
-//     "name": "SeattleJS Hackers",
-//     "creation_date": "Wed Apr 23 2014",
-//     "host": "Hackers"
+//     "name": "Rattlesnake Ledge",
+//     "location": "Riverbend, Washington",
+//     "length": "4.3",
+//     "stars": "4.4",
+//     "star_votes": "84",
+//     "summary": "An extremely popular out-and-back hike to the viewpoint on Rattlesnake Ledge.",
+//     "trail_url": "https://www.hikingproject.com/trail/7021679/rattlesnake-ledge",
+//     "conditions": "Dry: The trail is clearly marked and well maintained.",
+//     "condition_date": "2018-07-21",
+//     "condition_time": "0:00:00 "
 //   },
 //   {
-//     "link": "https://www.meetup.com/Angular-Seattle/events/253595182/",
-//     "name": "Angular Seattle",
-//     "creation_date": "Tue May 09 2017",
-//     "host": "Angulars"
+//     "name": "Mt. Si",
+//     "location": "Tanner, Washington",
+//     "length": "6.6",
+//     "stars": "4.4",
+//     "star_votes": "72",
+//     "summary": "A steep, well-maintained trail takes you atop Mt. Si with outrageous views of Puget Sound.",
+//     "trail_url": "https://www.hikingproject.com/trail/7001016/mt-si",
+//     "conditions": "Dry",
+//     "condition_date": "2018-07-22",
+//     "condition_time": "0:17:22 "
 //   },
 //   ...
 // ]
-
 
 //////////errors
 function handleError(error,response) {

@@ -54,3 +54,19 @@ CREATE TABLE IF NOT EXISTS meetups (
     created_at BIGINT,
     search_query VARCHAR(255)
 );
+
+CREATE TABLE IF NOT EXISTS trails (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255),
+    location VARCHAR(255),
+    length FLOAT,
+    stars FLOAT,
+    star_votes INT,
+    summary TEXT,
+    trail_url VARCHAR(255),
+    conditions VARCHAR(255),
+    condition_date BIGINT,
+    condition_time BIGINT,
+    created_at BIGINT,
+    search_query VARCHAR(255)
+);
