@@ -27,6 +27,7 @@ app.get('/location', getLocation);
 app.get('/weather', getWeather);
 app.get('/yelp', getRestaurants);
 app.get('/movies', getMovies);
+app.get('/meetups', getMeetups);
 
 function getLocation(request, response) {
   const locationHandler = {
@@ -322,6 +323,91 @@ Movies.lookUpMovies = (handler) => {
 
 
 ////////////////Meet Up///////////////////
+
+
+function getMeetups(request, response) {
+  const handler = {
+    search_query: request.query.data.search_query,
+
+    cacheHit: (result) => {
+      response.send(result.rows);
+    },
+
+    cacheMiss: () => {
+      Meetups.fetchMeetups(request.query.data)
+        .then(data => response.send(data))
+        .catch(console.error);
+    }
+  }
+
+  Meetups.lookUpMeetups(handler);
+}
+
+function Meetups(meetup, search_query) {
+  this.link = meetup.link;
+  this.name = meetup.name;
+  this.creation_date = new Date(meetup.created);
+  this.host = meetup.organizer.name;
+  this.created_at = new Date().getTime();
+  this.search_query = search_query;
+}
+
+Meetups.prototype.save = function () {
+  let SQL = `INSERT INTO meetups(link, name, creation_date, host, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6)`;
+  let values = Object.values(this);
+
+  client.query(SQL,values);
+}
+
+Meetups.fetchMeetups = (locationObject) => {
+  const URL = `https://api.meetup.com/find/groups?key=${process.env.MEETUPS_API_KEY}&query=${locationObject.search_query}&radius=1`
+  console.log('the URL is ' + URL);
+  return superagent.get(URL)
+    .then( data => {
+      if (!data.body) throw 'No Data';
+      else {
+        let movieMeetups = data.body.map( item => {
+          let meetup = new Meetups(item, locationObject.search_query);
+          meetup.save();
+          return meetup;
+        })
+        return movieMeetups;
+      }
+    })
+}
+
+Meetups.lookUpMeetups = (handler) => {
+  const SQL = `SELECT * FROM meetups WHERE search_query=$1;`
+  const values = [handler.search_query];
+
+  return client.query(SQL, values)
+    .then((results) => {
+      if (results.rowCount > 0) {
+        console.log('got Meetups data from database');
+        handler.cacheHit(results);
+      } else {
+        console.log('got Meetups data from API');
+        handler.cacheMiss();
+      }
+    })
+    .catch(console.error);
+}
+
+// [
+//   {
+//     "link": "https://www.meetup.com/seattlejshackers/events/253823797/",
+//     "name": "SeattleJS Hackers",
+//     "creation_date": "Wed Apr 23 2014",
+//     "host": "Hackers"
+//   },
+//   {
+//     "link": "https://www.meetup.com/Angular-Seattle/events/253595182/",
+//     "name": "Angular Seattle",
+//     "creation_date": "Tue May 09 2017",
+//     "host": "Angulars"
+//   },
+//   ...
+// ]
 
 
 //////////errors
