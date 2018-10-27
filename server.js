@@ -26,9 +26,9 @@ app.use(cors());
 app.get('/location', getHandlerFunction('locations'));
 app.get('/weather', getHandlerFunction('weathers'));
 app.get('/yelp', getHandlerFunction('restaurants'));
-app.get('/movies', getMovies);
-app.get('/meetups', getMeetups);
-app.get('/trails', getTrails);
+app.get('/movies', getHandlerFunction('movies'));
+app.get('/meetups', getHandlerFunction('meetups'));
+app.get('/trails', getHandlerFunction('trails'));
 
 function getHandlerFunction(name){
   return function (request, response) {
@@ -94,7 +94,6 @@ function lookupInfoInDatabase(name, handler) {
 }
 
 function fetchApiData(name, query) {
-  // const URL = apiConfig[name](query)
   let URL;
   let Constructor;
   let resultsKey;
@@ -118,10 +117,19 @@ function fetchApiData(name, query) {
     Constructor = Restaurants;
     resultsKey = 'businesses';
     break;
-  case 'restaurants':
-    URL = `https://api.yelp.com/v3/businesses/search?latitude=${query.latitude}&longitude=${query.longitude}&categories=restaurants`;
-    Constructor = Restaurants;
-    resultsKey = 'businesses';
+  case 'movies':
+    URL = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIES_API_KEY}&query=${query.search_query}`;
+    Constructor = Movies;
+    resultsKey = 'results';
+    break;
+  case 'meetups':
+    URL = `https://api.meetup.com/find/groups?key=${process.env.MEETUPS_API_KEY}&query=${query.search_query}&radius=1`;
+    Constructor = Meetups;
+    break;
+  case 'trails':
+    URL = `https://www.hikingproject.com/data/get-trails?lat=${query.latitude}&lon=${query.longitude}&key=${process.env.TRAILS_API_KEY}`;
+    Constructor = Trails;
+    resultsKey = 'trails';
     break;
   default:
     console.error('name does not have a URL defined', name);
@@ -187,9 +195,9 @@ Location.prototype.save = function () {
   let values = Object.values(this);
   client.query(SQL,values)
     .then(() => {
-      // console.log('insert',result)
+      console.log('location was saved to DB', values)
     })
-    .catch(e => console.error(e.stack));
+    .catch(error => console.error(error.stack));
 }
 
 /////weather////////////////
@@ -210,7 +218,7 @@ Weather.prototype.save = function () {
     .catch(err => console.error('weather save error',err))
 }
 
-////YELP
+////YELP/////////////
 
 function Restaurants(query, data) {
   this.name = data.name;
@@ -233,24 +241,6 @@ Restaurants.prototype.save = function () {
 
 // //////////MOVIES///////////////
 
-function getMovies(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Movies.fetchMovies(request.query.data)
-        .then(data => response.send(data))
-        .catch(console.error);
-    }
-  }
-
-  Movies.lookUpMovies(handler);
-}
-
 function Movies(query, data) {
   this.title = data.title;
   this.overview = data.overview;
@@ -268,67 +258,12 @@ Movies.prototype.save = function () {
   let values = Object.values(this);
 
   client.query(SQL,values)
-    .then(data=>console.log('movie saved', data))
+    .then(data=>console.log('movie saved', data.command))
     .catch(err => console.error('movie save error',err));
-}
-
-Movies.fetchMovies = (locationObject) => {
-  const URL = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIES_API_KEY}&query=${locationObject.search_query}`;
-  console.log('the URL is ' + URL);
-  return superagent.get(URL)
-    .then( data => {
-      // console.log(data.body);
-      if (!data.body) throw 'No Data';
-      else {
-        let movieData = data.body.results.map( item => {
-          let movies = new Movies(item, locationObject.search_query);
-          movies.save();
-          return movies;
-        })
-        return movieData;
-      }
-    })
-    .catch(console.error);
-}
-
-Movies.lookUpMovies = (handler) => {
-  const SQL = `SELECT * FROM movies WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got Movies data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got Movies data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
 }
 
 
 ////////////////Meet Up///////////////////
-
-
-function getMeetups(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Meetups.fetchMeetups(request.query.data)
-        .then(data => response.send(data))
-        .catch(console.error);
-    }
-  }
-
-  Meetups.lookUpMeetups(handler);
-}
 
 function Meetups(query, data) {
   this.link = data.link;
@@ -344,65 +279,11 @@ Meetups.prototype.save = function () {
   let values = Object.values(this);
 
   client.query(SQL,values)
-    .then(data=>console.log('meetup saved', data))
+    .then(data=>console.log('meetup saved', data.command))
     .catch(err => console.error('meetup save error',err));
 }
 
-Meetups.fetchMeetups = (locationObject) => {
-  const URL = `https://api.meetup.com/find/groups?key=${process.env.MEETUPS_API_KEY}&query=${locationObject.search_query}&radius=1`
-  console.log('the URL is ' + URL);
-  return superagent.get(URL)
-    .then( data => {
-      if (!data.body) throw 'No Data';
-      else {
-        let movieMeetups = data.body.map( item => {
-          let meetup = new Meetups(item, locationObject.search_query);
-          meetup.save();
-          return meetup;
-        })
-        return movieMeetups;
-      }
-    })
-    .catch(console.error);
-}
-
-Meetups.lookUpMeetups = (handler) => {
-  const SQL = `SELECT * FROM meetups WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got Meetups data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got Meetups data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
-
 ////////////TRAILS///////////////
-
-
-function getTrails(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Trails.fetchTrails(request.query.data)
-        .then(data => response.send(data))
-        .catch(console.error);
-    }
-  }
-
-  Trails.lookUpTrails(handler);
-}
 
 function Trails(query, data) {
   this.name = data.name;
@@ -422,77 +303,12 @@ function Trails(query, data) {
 Trails.prototype.save = function () {
   let SQL = `INSERT INTO trails(name, location, length, stars, star_votes, summary, trail_url, conditions, condition_date, condition_time, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`;
   let values = Object.values(this);
-  console.log(values)
   client.query(SQL,values)
-    .then(data=>console.log('trail saved', data))
+    .then(data=>console.log('trail saved', data.command))
     .catch(err => console.error('trail save error',err));
 }
 
-Trails.fetchTrails = (locationObject) => {
-  const URL = `https://www.hikingproject.com/data/get-trails?lat=${locationObject.latitude}&lon=${locationObject.longitude}&key=${process.env.TRAILS_API_KEY}`
-  console.log('the URL is ' + URL);
-  return superagent.get(URL)
-    .then( data => {
-      if (!data.body) throw 'No Data';
-      else {
-        let trailData = data.body.trails.map( item => {
-          let trails = new Trails (item, locationObject.search_query);
-          trails.save();
-          return trails;
-        })
-        return trailData;
-      }
-    })
-    .catch(console.error);
-}
-
-Trails.lookUpTrails = (handler) => {
-  const SQL = `SELECT * FROM trails WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got Trails data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got Trails data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
-
-
-// [
-//   {
-//     "name": "Rattlesnake Ledge",
-//     "location": "Riverbend, Washington",
-//     "length": "4.3",
-//     "stars": "4.4",
-//     "star_votes": "84",
-//     "summary": "An extremely popular out-and-back hike to the viewpoint on Rattlesnake Ledge.",
-//     "trail_url": "https://www.hikingproject.com/trail/7021679/rattlesnake-ledge",
-//     "conditions": "Dry: The trail is clearly marked and well maintained.",
-//     "condition_date": "2018-07-21",
-//     "condition_time": "0:00:00 "
-//   },
-//   {
-//     "name": "Mt. Si",
-//     "location": "Tanner, Washington",
-//     "length": "6.6",
-//     "stars": "4.4",
-//     "star_votes": "72",
-//     "summary": "A steep, well-maintained trail takes you atop Mt. Si with outrageous views of Puget Sound.",
-//     "trail_url": "https://www.hikingproject.com/trail/7001016/mt-si",
-//     "conditions": "Dry",
-//     "condition_date": "2018-07-22",
-//     "condition_time": "0:17:22 "
-//   },
-//   ...
-// ]
-
-//////////errors
+//////////errors////////////////////
 function handleError(name, error, response) {
   console.log(name, 'error',error);
   if(response){
