@@ -25,7 +25,7 @@ app.use(cors());
 
 app.get('/location', getHandlerFunction('locations'));
 app.get('/weather', getHandlerFunction('weathers'));
-app.get('/yelp', getRestaurants);
+app.get('/yelp', getHandlerFunction('restaurants'));
 app.get('/movies', getMovies);
 app.get('/meetups', getMeetups);
 app.get('/trails', getTrails);
@@ -53,6 +53,13 @@ function getHandlerFunction(name){
   }
 }
 
+const cacheForMinutes = {
+  locations: 0,
+  meetups: 60*60*24,
+  trails: 60,
+  restaurants: 60*60*24,
+  weathers: 60
+}
 function lookupInfoInDatabase(name, handler) {
   const SQL = `SELECT * FROM ${name} WHERE search_query=$1;`
   const values = [handler.query];
@@ -64,15 +71,20 @@ function lookupInfoInDatabase(name, handler) {
         console.log(`${name} data existed in DATABASE`);
 
         if (name !== 'locations'){
-          let currentAge = (new Date().getTime() - result.rows[0].created_at) / (1000*60*60*24);
+          let minutesOld = (new Date().getTime() - result.rows[0].created_at) / (1000*60);
 
-          if (result.rowCount > 0 && currentAge > 60) {
+          if (
+            result.rowCount > 0 &&
+            (!cacheForMinutes[name] || minutesOld > cacheForMinutes[name])
+          ) {
             console.log(`${name} Data was too old`);
-            deleteEntryByQuery(handler.search_query)
+            deleteEntryByQuery(name, handler.search_query)
             handler.cacheMiss();
           } else {
             handler.cacheHit(result);
           }
+        } else {
+          handler.cacheHit(result);
         }
       } else {
         handler.cacheMiss();
@@ -81,43 +93,77 @@ function lookupInfoInDatabase(name, handler) {
     .catch(error => handleError(`look up ${name}`, error));
 }
 
-// const apiConfig = {
-//   location: function(query){
-//     return `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
-//   }
-// }
 function fetchApiData(name, query) {
   // const URL = apiConfig[name](query)
   let URL;
   let Constructor;
+  let resultsKey;
+  let resultsSubKey;
+  let resultsGetAll = true;
   switch(name) {
   case 'locations':
     URL = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
     Constructor = Location;
+    resultsKey = 'results';
+    resultsGetAll = false;
     break;
   case 'weathers':
     URL = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${query.latitude},${query.longitude}`;
     Constructor = Weather;
+    resultsKey = 'daily';
+    resultsSubKey = 'data';
+    break;
+  case 'restaurants':
+    URL = `https://api.yelp.com/v3/businesses/search?latitude=${query.latitude}&longitude=${query.longitude}&categories=restaurants`;
+    Constructor = Restaurants;
+    resultsKey = 'businesses';
+    break;
+  case 'restaurants':
+    URL = `https://api.yelp.com/v3/businesses/search?latitude=${query.latitude}&longitude=${query.longitude}&categories=restaurants`;
+    Constructor = Restaurants;
+    resultsKey = 'businesses';
     break;
   default:
     console.error('name does not have a URL defined', name);
   }
 
   return superagent.get(URL)
+    .set( 'Authorization', name==='restaurants' ? `Bearer ${process.env.YELP_API_KEY}` : '')
     .then(data => {
       console.log(`got ${name} data from API:`);
-      if (!data.body.results.length) throw 'No Data';
+      if (!data.body) throw `No Data from ${name} API`;
       else {
-        let formattedDataObject = new Constructor(query, data.body.results[0]);
-        formattedDataObject.save();
-
-        return formattedDataObject;
+        // locations: data.body.results (first array item)
+        // weather: data.body.daily.data (all array items)
+        // restaurants: data.body.businesses (all array items)
+        // movies: data.body.results (all array items)
+        // meetups: data.body (all array items)
+        // trails: data.body.trails (all array items)
+        let results = data.body;
+        if(resultsKey){
+          results = results[resultsKey];
+        }
+        if(resultsSubKey){ // handle case of weather
+          results = results[resultsSubKey];
+        }
+        if(!resultsGetAll){// this is for the location
+          let formattedDataObject = new Constructor(query,results[0]);
+          formattedDataObject.save();
+          return formattedDataObject;
+        } else {
+          let apiData = results.map( value => {
+            let formattedDataObject = new Constructor(query, value);
+            formattedDataObject.save();
+            return formattedDataObject;
+          })
+          return apiData;
+        }
       }
     })
     .catch(console.error);
 }
 
-function deleteEntryByQuery(search_query) {
+function deleteEntryByQuery(name, search_query) {
   const SQL = `DELETE FROM ${name} WHERE search_query=$1;`;
   const value = [search_query];
   client.query(SQL, value)
@@ -146,15 +192,13 @@ Location.prototype.save = function () {
     .catch(e => console.error(e.stack));
 }
 
-
-
 /////weather////////////////
 
-function Weather (day, search_query) {
-  this.forecast = day.summary;
-  this.time = new Date(day.time * 1000).toString().slice(0,15);
+function Weather (query, data) {
+  this.forecast = data.summary;
+  this.time = new Date(data.time * 1000).toString().slice(0,15);
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Weather.prototype.save = function () {
@@ -166,80 +210,16 @@ Weather.prototype.save = function () {
     .catch(err => console.error('weather save error',err))
 }
 
-
-Weather.fetchWeather = (locationObject) => {
-  const URL = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${locationObject.latitude},${locationObject.longitude}`;
-
-  return superagent.get(URL)
-    .then(data => {
-      if (!data.body.daily.data.length) throw 'No Data';
-      else {
-        let weatherData = data.body.daily.data.map( day => {
-          let weather = new Weather(day, locationObject.search_query);
-          weather.save();
-          return weather;
-        })
-        return weatherData;
-      }
-    })
-    .catch(console.error);
-}
-
-
-
-Weather.lookUpWeather = (handler) => {
-  const SQL = `SELECT * FROM weathers WHERE search_query=$1;`
-  client.query(SQL, [handler.search_query])
-    .then(result => {
-      if(result.rowCount > 0 ){
-        console.log('WEATHER data existed in DABTABASE');
-
-        let currentAge = (new Date().getTime() - result.rows[0].created_at) / (1000*60*60*24);
-
-        if (result.rowCount > 0 && currentAge > 60) {
-          console.log('WEATHER Data was too old');
-          Weather.deleteEntryByQuery(handler.search_query)
-          console.log('Got WEATHE data from API')
-          handler.cacheMiss();
-        } else {
-          console.log('Got WEATHER Data from DataBase');
-          handler.cacheHit(result);
-        }
-      } else {
-        console.log('Got WEATHER data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(error => handleError('look up weather', error));
-}
-
 ////YELP
 
-function getRestaurants(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Restaurants.fetchRestaurants(request.query.data)
-        .then(data => response.send(data));
-    }
-  }
-
-  Restaurants.lookUpRestaurants(handler);
-}
-
-function Restaurants(restaurants, search_query) {
-  this.name = restaurants.name;
-  this.image_url = restaurants.image_url;
-  this.price = restaurants.price;
-  this.rating = restaurants.rating;
-  this.url = restaurants.url;
+function Restaurants(query, data) {
+  this.name = data.name;
+  this.image_url = data.image_url;
+  this.price = data.price;
+  this.rating = data.rating;
+  this.url = data.url;
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Restaurants.prototype.save = function () {
@@ -251,64 +231,6 @@ Restaurants.prototype.save = function () {
     .catch(err => console.error('restaurant save error',err));
 }
 
-Restaurants.deleteEntryByQuery = function(search_query) {
-  const SQL = 'DELETE FROM weathers WHERE search_query=$1;';
-  const value = [search_query];
-  client.query(SQL, value)
-    .then(() => {
-      console.log('DELETED restaurant entry from SQL');
-    })
-    .catch(error => handleError('restaurant',error));
-}
-
-Restaurants.fetchRestaurants = (locationObject) => {
-  
-  const URL = `https://api.yelp.com/v3/businesses/search?latitude=${locationObject.latitude}&longitude=${locationObject.longitude}&categories=restaurants`;
-
-  return superagent.get(URL)
-    .set( 'Authorization', `Bearer ${process.env.YELP_API_KEY}`)
-    .then( data => {
-      if (!data.body.businesses.length) throw 'Restaurant API found no data';
-      else {
-        console.log('Got Restaurant data from API');
-        let restaurantsData = data.body.businesses.map( item => {
-          let restaurants = new Restaurants(item, locationObject.search_query);
-          restaurants.save();
-          return restaurants;
-        })
-        return restaurantsData;
-      }
-    })
-    .catch(error => handleError('fetch restaurants', error));
-}
-
-Restaurants.lookUpRestaurants = (handler) => {
-  const SQL = `SELECT * FROM restaurants WHERE search_query=$1;`
-  const values = [handler.search_query];
-  return client.query(SQL, values)
-    .then(results => {
-      if (results.rowCount > 0) {
-
-        //calc how old the data is in days
-        let daysOld = (new Date().getTime() - results.rows[0].created_at) / (1000*60*60*24);
-        console.log('results.rows[0].created_at is ', results.rows[0].created_at);
-
-        if (daysOld > 1) {
-          console.log('Restaurant Data was too old', daysOld);
-          Restaurants.deleteEntryByQuery(handler.search_query)
-          handler.cacheMiss();
-        } else {
-          console.log('Got restaurant Data from DataBase');
-          handler.cacheHit(results);
-        }
-      } else {
-        console.log('Got restaurant data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(error => handleError('look up Restaurants', error));
-
-}
 // //////////MOVIES///////////////
 
 function getMovies(request, response) {
@@ -329,16 +251,16 @@ function getMovies(request, response) {
   Movies.lookUpMovies(handler);
 }
 
-function Movies(movie, search_query) {
-  this.title = movie.title;
-  this.overview = movie.overview;
-  this.average_votes = movie.vote_average;
-  this.total_votes = movie.vote_count;
-  this.image_url = 'https://image.tmdb.org/t/p/w500/'+movie.poster_path;
-  this.popularity = movie.popularity;
-  this.released_on = movie.release_date;
+function Movies(query, data) {
+  this.title = data.title;
+  this.overview = data.overview;
+  this.average_votes = data.vote_average;
+  this.total_votes = data.vote_count;
+  this.image_url = 'https://image.tmdb.org/t/p/w500/'+data.poster_path;
+  this.popularity = data.popularity;
+  this.released_on = data.release_date;
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Movies.prototype.save = function () {
@@ -408,13 +330,13 @@ function getMeetups(request, response) {
   Meetups.lookUpMeetups(handler);
 }
 
-function Meetups(meetup, search_query) {
-  this.link = meetup.link;
-  this.name = meetup.name;
-  this.creation_date = new Date(meetup.created);
-  this.host = meetup.organizer.name;
+function Meetups(query, data) {
+  this.link = data.link;
+  this.name = data.name;
+  this.creation_date = new Date(data.created);
+  this.host = data.organizer.name;
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Meetups.prototype.save = function () {
@@ -482,19 +404,19 @@ function getTrails(request, response) {
   Trails.lookUpTrails(handler);
 }
 
-function Trails(trail, search_query) {
-  this.name = trail.name;
-  this.location = trail.location;
-  this.length = trail.length;
-  this.stars = trail.stars;
-  this.star_votes = trail.starVotes;
-  this.summary = trail.summary;
-  this.trail_url = trail.url;
-  this.conditions = trail.conditionDetails;
-  this.condition_date = trail.conditionDate.slice(0, 10);
-  this.condition_time = trail.conditionDate.slice(11,19);
+function Trails(query, data) {
+  this.name = data.name;
+  this.location = data.location;
+  this.length = data.length;
+  this.stars = data.stars;
+  this.star_votes = data.starVotes;
+  this.summary = data.summary;
+  this.trail_url = data.url;
+  this.conditions = data.conditionDetails;
+  this.condition_date = data.conditionDate.slice(0, 10);
+  this.condition_time = data.conditionDate.slice(11,19);
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Trails.prototype.save = function () {
