@@ -82,7 +82,8 @@ Location.fetchLocation = (query) => {
 
         return location;
       }
-    });
+    })
+    .catch(console.error);
 }
 Location.prototype.save = function () {
   let SQL = `INSERT INTO locations(search_query, formatted_query, latitude, longitude) VALUES($1, $2, $3, $4)`;
@@ -137,7 +138,19 @@ Weather.prototype.save = function () {
   let SQL = `INSERT INTO weathers(forecast, time, created_at, search_query) VALUES($1, $2, $3, $4)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(()=>console.log('weather saved'))
+    .catch(err => console.error('weather save error',err))
+}
+
+Weather.deleteEntryByQuery = function(search_query) {
+  const SQL = 'DELETE FROM weathers WHERE search_query=$1;';
+  const value = [search_query];
+  client.query(SQL, value)
+    .then(() => {
+      console.log('DELETED entry from SQL');
+    })
+    .catch(error => handleError('weather',error));
 }
 
 Weather.fetchWeather = (locationObject) => {
@@ -154,26 +167,36 @@ Weather.fetchWeather = (locationObject) => {
         })
         return weatherData;
       }
-    });
+    })
+    .catch(console.error);
 }
 
 
 
 Weather.lookUpWeather = (handler) => {
   const SQL = `SELECT * FROM weathers WHERE search_query=$1;`
-  const values = [handler.search_query];
+  client.query(SQL, [handler.search_query])
+    .then(result => {
+      if(result.rowCount > 0 ){
+        console.log('data existed in SQL');
 
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got weather data from database');
-        handler.cacheHit(results);
+        let currentAge = Date.now() - result.rows[0].created_at / (1000*60);
+
+        if (result.rowCount > 0 && currentAge > 1) {
+          console.log('Data was too old');
+          Weather.deleteEntryByQuery(handler.search_query)
+          console.log('Got data from API')
+          handler.cacheMiss();
+        } else {
+          console.log('Got Data from DataBase');
+          handler.cacheHit(result);
+        }
       } else {
-        console.log('got weather data from API');
+        console.log('Got data from API');
         handler.cacheMiss();
       }
     })
-    .catch(console.error);
+    .catch(error => handleError('look up weather', error));
 }
 
 ////YELP
@@ -209,7 +232,9 @@ Restaurants.prototype.save = function () {
   let SQL = `INSERT INTO restaurants(name, image_url, price, rating, url, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(data=>console.log('restaurant saved', data))
+    .catch(err => console.error('restaurant save error',err));
 }
 
 Restaurants.fetchRestaurants = (locationObject) => {
@@ -229,7 +254,7 @@ Restaurants.fetchRestaurants = (locationObject) => {
         return restaurantsData;
       }
     })
-    .catch(error => handleError(error));
+    .catch(error => handleError('fetch restaurants', error));
 }
 
 Restaurants.lookUpRestaurants = (handler) => {
@@ -284,7 +309,9 @@ Movies.prototype.save = function () {
   let SQL = `INSERT INTO movies(title, overview, average_votes, total_votes, image_url, popularity, released_on, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(data=>console.log('movie saved', data))
+    .catch(err => console.error('movie save error',err));
 }
 
 Movies.fetchMovies = (locationObject) => {
@@ -303,6 +330,7 @@ Movies.fetchMovies = (locationObject) => {
         return movieData;
       }
     })
+    .catch(console.error);
 }
 
 Movies.lookUpMovies = (handler) => {
@@ -357,7 +385,9 @@ Meetups.prototype.save = function () {
   let SQL = `INSERT INTO meetups(link, name, creation_date, host, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(data=>console.log('meetup saved', data))
+    .catch(err => console.error('meetup save error',err));
 }
 
 Meetups.fetchMeetups = (locationObject) => {
@@ -375,6 +405,7 @@ Meetups.fetchMeetups = (locationObject) => {
         return movieMeetups;
       }
     })
+    .catch(console.error);
 }
 
 Meetups.lookUpMeetups = (handler) => {
@@ -431,10 +462,12 @@ function Trails(trail, search_query) {
 }
 
 Trails.prototype.save = function () {
-  let SQL = `INSERT INTO trails(name, location, length, stars, star_votes, summary, trail_url, conditions, condition_date, condition_time, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+  let SQL = `INSERT INTO trails(name, location, length, stars, star_votes, summary, trail_url, conditions, condition_date, condition_time, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`;
   let values = Object.values(this);
-
-  client.query(SQL,values);
+  console.log(values)
+  client.query(SQL,values)
+    .then(data=>console.log('trail saved', data))
+    .catch(err => console.error('trail save error',err));
 }
 
 Trails.fetchTrails = (locationObject) => {
@@ -444,14 +477,15 @@ Trails.fetchTrails = (locationObject) => {
     .then( data => {
       if (!data.body) throw 'No Data';
       else {
-        let trailData = data.trails.map( item => {
-          let trails = new Meetups(item, locationObject.search_query);
+        let trailData = data.body.trails.map( item => {
+          let trails = new Trails (item, locationObject.search_query);
           trails.save();
           return trails;
         })
         return trailData;
       }
     })
+    .catch(console.error);
 }
 
 Trails.lookUpTrails = (handler) => {
@@ -501,8 +535,8 @@ Trails.lookUpTrails = (handler) => {
 // ]
 
 //////////errors
-function handleError(error,response) {
-  console.log('error',error);
+function handleError(name, error, response) {
+  console.log(name, 'error',error);
   if(response){
     response.status(500).send('sorry there is no data')
   }
