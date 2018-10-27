@@ -23,29 +23,111 @@ app.use(cors());
 
 
 
-app.get('/location', getLocation);
-app.get('/weather', getWeather);
+app.get('/location', getHandlerFunction('locations'));
+app.get('/weather', getHandlerFunction('weathers'));
 app.get('/yelp', getRestaurants);
 app.get('/movies', getMovies);
 app.get('/meetups', getMeetups);
 app.get('/trails', getTrails);
 
-function getLocation(request, response) {
-  const locationHandler = {
-    query: request.query.data,
-
-    cacheHit: (results) => {
-      response.send(results.rows[0]);
-    },
-
-    cacheMiss: () => {
-      Location.fetchLocation(request.query.data)
-        .then(data => response.send(data));
+function getHandlerFunction(name){
+  return function (request, response) {
+    const handler = {
+      // in the case of /location, request.query.data is the search_query
+      // in the case of others, request.query.data is the location object
+      query: request.query.data,
+  
+      cacheHit: (results) => {
+        // locations wants just the firt record
+        // others need all results
+        response.send(name ==='locations' ? results.rows[0] : results.rows);
+      },
+  
+      cacheMiss: () => {
+        fetchApiData(name, request.query.data)
+          .then(data => response.send(data));
+      }
     }
+  
+    lookupInfoInDatabase(name, handler);
+  }
+}
+
+function lookupInfoInDatabase(name, handler) {
+  const SQL = `SELECT * FROM ${name} WHERE search_query=$1;`
+  const values = [handler.query];
+
+  return client.query(SQL, values)
+
+    .then(result => {
+      if (result.rowCount > 0) {
+        console.log(`${name} data existed in DATABASE`);
+
+        if (name !== 'locations'){
+          let currentAge = (new Date().getTime() - result.rows[0].created_at) / (1000*60*60*24);
+
+          if (result.rowCount > 0 && currentAge > 60) {
+            console.log(`${name} Data was too old`);
+            deleteEntryByQuery(handler.search_query)
+            handler.cacheMiss();
+          } else {
+            handler.cacheHit(result);
+          }
+        }
+      } else {
+        handler.cacheMiss();
+      }
+    })
+    .catch(error => handleError(`look up ${name}`, error));
+}
+
+// const apiConfig = {
+//   location: function(query){
+//     return `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
+//   }
+// }
+function fetchApiData(name, query) {
+  // const URL = apiConfig[name](query)
+  let URL;
+  let Constructor;
+  switch(name) {
+  case 'locations':
+    URL = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
+    Constructor = Location;
+    break;
+  case 'weathers':
+    URL = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${query.latitude},${query.longitude}`;
+    Constructor = Weather;
+    break;
+  default:
+    console.error('name does not have a URL defined', name);
   }
 
-  Location.lookUpLocation(locationHandler);
+  return superagent.get(URL)
+    .then(data => {
+      console.log(`got ${name} data from API:`);
+      if (!data.body.results.length) throw 'No Data';
+      else {
+        let formattedDataObject = new Constructor(query, data.body.results[0]);
+        formattedDataObject.save();
+
+        return formattedDataObject;
+      }
+    })
+    .catch(console.error);
 }
+
+function deleteEntryByQuery(search_query) {
+  const SQL = `DELETE FROM ${name} WHERE search_query=$1;`;
+  const value = [search_query];
+  client.query(SQL, value)
+    .then(() => {
+      console.log(`DELETED ${name} entry from database`);
+    })
+    .catch(error => handleError(name ,error));
+}
+
+////////////////LOCATION////////////////
 
 function Location(query, data) {
   this.search_query = query;
@@ -54,37 +136,6 @@ function Location(query, data) {
   this.longitude = data.geometry.location.lng;
 }
 
-Location.lookUpLocation = (handler) => {
-  const SQL = `SELECT * FROM locations WHERE search_query=$1;`
-  const values = [handler.query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        handler.cacheHit(results);
-      } else {
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
-
-Location.fetchLocation = (query) => {
-  const URL = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
-
-  return superagent.get(URL)
-    .then(data => {
-      console.log('got location data from google maps API:');
-      if (!data.body.results.length) throw 'No Data';
-      else {
-        let location = new Location(query, data.body.results[0]);
-        location.save();
-
-        return location;
-      }
-    })
-    .catch(console.error);
-}
 Location.prototype.save = function () {
   let SQL = `INSERT INTO locations(search_query, formatted_query, latitude, longitude) VALUES($1, $2, $3, $4)`;
   let values = Object.values(this);
@@ -97,35 +148,7 @@ Location.prototype.save = function () {
 
 
 
-
-
-
 /////weather////////////////
-
-
-/**
- * getWeather is an API handler for fetching weather related to a location search string
- * request.query.data is a full location object (minus the location_id)
- * 
- * @param {object} request 
- * @param {object} response 
- */
-function getWeather(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Weather.fetchWeather(request.query.data)
-        .then(data => response.send(data));
-    }
-  }
-
-  Weather.lookUpWeather(handler);
-}
 
 function Weather (day, search_query) {
   this.forecast = day.summary;
@@ -143,15 +166,6 @@ Weather.prototype.save = function () {
     .catch(err => console.error('weather save error',err))
 }
 
-Weather.deleteEntryByQuery = function(search_query) {
-  const SQL = 'DELETE FROM weathers WHERE search_query=$1;';
-  const value = [search_query];
-  client.query(SQL, value)
-    .then(() => {
-      console.log('DELETED entry from SQL');
-    })
-    .catch(error => handleError('weather',error));
-}
 
 Weather.fetchWeather = (locationObject) => {
   const URL = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${locationObject.latitude},${locationObject.longitude}`;
@@ -178,21 +192,21 @@ Weather.lookUpWeather = (handler) => {
   client.query(SQL, [handler.search_query])
     .then(result => {
       if(result.rowCount > 0 ){
-        console.log('data existed in SQL');
+        console.log('WEATHER data existed in DABTABASE');
 
-        let currentAge = Date.now() - result.rows[0].created_at / (1000*60);
+        let currentAge = (new Date().getTime() - result.rows[0].created_at) / (1000*60*60*24);
 
-        if (result.rowCount > 0 && currentAge > 1) {
-          console.log('Data was too old');
+        if (result.rowCount > 0 && currentAge > 60) {
+          console.log('WEATHER Data was too old');
           Weather.deleteEntryByQuery(handler.search_query)
-          console.log('Got data from API')
+          console.log('Got WEATHE data from API')
           handler.cacheMiss();
         } else {
-          console.log('Got Data from DataBase');
+          console.log('Got WEATHER Data from DataBase');
           handler.cacheHit(result);
         }
       } else {
-        console.log('Got data from API');
+        console.log('Got WEATHER data from API');
         handler.cacheMiss();
       }
     })
@@ -233,8 +247,18 @@ Restaurants.prototype.save = function () {
   let values = Object.values(this);
 
   client.query(SQL,values)
-    .then(data=>console.log('restaurant saved', data))
+    .then(data=>console.log('restaurant', data.command))
     .catch(err => console.error('restaurant save error',err));
+}
+
+Restaurants.deleteEntryByQuery = function(search_query) {
+  const SQL = 'DELETE FROM weathers WHERE search_query=$1;';
+  const value = [search_query];
+  client.query(SQL, value)
+    .then(() => {
+      console.log('DELETED restaurant entry from SQL');
+    })
+    .catch(error => handleError('restaurant',error));
 }
 
 Restaurants.fetchRestaurants = (locationObject) => {
@@ -244,8 +268,9 @@ Restaurants.fetchRestaurants = (locationObject) => {
   return superagent.get(URL)
     .set( 'Authorization', `Bearer ${process.env.YELP_API_KEY}`)
     .then( data => {
-      if (!data.body.businesses.length) throw 'No Data';
+      if (!data.body.businesses.length) throw 'Restaurant API found no data';
       else {
+        console.log('Got Restaurant data from API');
         let restaurantsData = data.body.businesses.map( item => {
           let restaurants = new Restaurants(item, locationObject.search_query);
           restaurants.save();
@@ -260,18 +285,29 @@ Restaurants.fetchRestaurants = (locationObject) => {
 Restaurants.lookUpRestaurants = (handler) => {
   const SQL = `SELECT * FROM restaurants WHERE search_query=$1;`
   const values = [handler.search_query];
-
   return client.query(SQL, values)
-    .then((results) => {
+    .then(results => {
       if (results.rowCount > 0) {
-        console.log('got restaurants data from database');
-        handler.cacheHit(results);
+
+        //calc how old the data is in days
+        let daysOld = (new Date().getTime() - results.rows[0].created_at) / (1000*60*60*24);
+        console.log('results.rows[0].created_at is ', results.rows[0].created_at);
+
+        if (daysOld > 1) {
+          console.log('Restaurant Data was too old', daysOld);
+          Restaurants.deleteEntryByQuery(handler.search_query)
+          handler.cacheMiss();
+        } else {
+          console.log('Got restaurant Data from DataBase');
+          handler.cacheHit(results);
+        }
       } else {
-        console.log('got restaurants data from API');
+        console.log('Got restaurant data from API');
         handler.cacheMiss();
       }
     })
-    .catch(console.error);
+    .catch(error => handleError('look up Restaurants', error));
+
 }
 // //////////MOVIES///////////////
 
