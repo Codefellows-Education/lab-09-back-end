@@ -23,29 +23,165 @@ app.use(cors());
 
 
 
-app.get('/location', getLocation);
-app.get('/weather', getWeather);
-app.get('/yelp', getRestaurants);
-app.get('/movies', getMovies);
-app.get('/meetups', getMeetups);
-app.get('/trails', getTrails);
+app.get('/location', getHandlerFunction('locations'));
+app.get('/weather', getHandlerFunction('weathers'));
+app.get('/yelp', getHandlerFunction('restaurants'));
+app.get('/movies', getHandlerFunction('movies'));
+app.get('/meetups', getHandlerFunction('meetups'));
+app.get('/trails', getHandlerFunction('trails'));
 
-function getLocation(request, response) {
-  const locationHandler = {
-    query: request.query.data,
-
-    cacheHit: (results) => {
-      response.send(results.rows[0]);
-    },
-
-    cacheMiss: () => {
-      Location.fetchLocation(request.query.data)
-        .then(data => response.send(data));
+function getHandlerFunction(name){
+  return function (request, response) {
+    const handler = {
+      // in the case of /location, request.query.data is the search_query
+      // in the case of others, request.query.data is the location object
+      query: request.query.data,
+  
+      cacheHit: (results) => {
+        // locations wants just the firt record
+        // others need all results
+        response.send(name ==='locations' ? results.rows[0] : results.rows);
+      },
+  
+      cacheMiss: () => {
+        fetchApiData(name, request.query.data)
+          .then(data => response.send(data));
+      }
     }
+  
+    lookupInfoInDatabase(name, handler);
+  }
+}
+
+const cacheForMinutes = {
+  locations: 0,
+  meetups: 60*60*24,
+  trails: 60,
+  restaurants: 60*60*24,
+  weathers: 60
+}
+function lookupInfoInDatabase(name, handler) {
+  const SQL = `SELECT * FROM ${name} WHERE search_query=$1;`
+  const values = [handler.query];
+
+  return client.query(SQL, values)
+
+    .then(result => {
+      if (result.rowCount > 0) {
+        console.log(`${name} data existed in DATABASE`);
+
+        if (name !== 'locations'){
+          let minutesOld = (new Date().getTime() - result.rows[0].created_at) / (1000*60);
+
+          if (
+            result.rowCount > 0 &&
+            (!cacheForMinutes[name] || minutesOld > cacheForMinutes[name])
+          ) {
+            console.log(`${name} Data was too old`);
+            deleteEntryByQuery(name, handler.search_query)
+            handler.cacheMiss();
+          } else {
+            handler.cacheHit(result);
+          }
+        } else {
+          handler.cacheHit(result);
+        }
+      } else {
+        handler.cacheMiss();
+      }
+    })
+    .catch(error => handleError(`look up ${name}`, error));
+}
+
+function fetchApiData(name, query) {
+  let URL;
+  let Constructor;
+  let resultsKey;
+  let resultsSubKey;
+  let resultsGetAll = true;
+  switch(name) {
+  case 'locations':
+    URL = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
+    Constructor = Location;
+    resultsKey = 'results';
+    resultsGetAll = false;
+    break;
+  case 'weathers':
+    URL = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${query.latitude},${query.longitude}`;
+    Constructor = Weather;
+    resultsKey = 'daily';
+    resultsSubKey = 'data';
+    break;
+  case 'restaurants':
+    URL = `https://api.yelp.com/v3/businesses/search?latitude=${query.latitude}&longitude=${query.longitude}&categories=restaurants`;
+    Constructor = Restaurants;
+    resultsKey = 'businesses';
+    break;
+  case 'movies':
+    URL = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIES_API_KEY}&query=${query.search_query}`;
+    Constructor = Movies;
+    resultsKey = 'results';
+    break;
+  case 'meetups':
+    URL = `https://api.meetup.com/find/groups?key=${process.env.MEETUPS_API_KEY}&query=${query.search_query}&radius=1`;
+    Constructor = Meetups;
+    break;
+  case 'trails':
+    URL = `https://www.hikingproject.com/data/get-trails?lat=${query.latitude}&lon=${query.longitude}&key=${process.env.TRAILS_API_KEY}`;
+    Constructor = Trails;
+    resultsKey = 'trails';
+    break;
+  default:
+    console.error('name does not have a URL defined', name);
   }
 
-  Location.lookUpLocation(locationHandler);
+  return superagent.get(URL)
+    .set( 'Authorization', name==='restaurants' ? `Bearer ${process.env.YELP_API_KEY}` : '')
+    .then(data => {
+      console.log(`got ${name} data from API:`);
+      if (!data.body) throw `No Data from ${name} API`;
+      else {
+        // locations: data.body.results (first array item)
+        // weather: data.body.daily.data (all array items)
+        // restaurants: data.body.businesses (all array items)
+        // movies: data.body.results (all array items)
+        // meetups: data.body (all array items)
+        // trails: data.body.trails (all array items)
+        let results = data.body;
+        if(resultsKey){
+          results = results[resultsKey];
+        }
+        if(resultsSubKey){ // handle case of weather
+          results = results[resultsSubKey];
+        }
+        if(!resultsGetAll){// this is for the location
+          let formattedDataObject = new Constructor(query,results[0]);
+          formattedDataObject.save();
+          return formattedDataObject;
+        } else {
+          let apiData = results.map( value => {
+            let formattedDataObject = new Constructor(query, value);
+            formattedDataObject.save();
+            return formattedDataObject;
+          })
+          return apiData;
+        }
+      }
+    })
+    .catch(console.error);
 }
+
+function deleteEntryByQuery(name, search_query) {
+  const SQL = `DELETE FROM ${name} WHERE search_query=$1;`;
+  const value = [search_query];
+  client.query(SQL, value)
+    .then(() => {
+      console.log(`DELETED ${name} entry from database`);
+    })
+    .catch(error => handleError(name ,error));
+}
+
+////////////////LOCATION////////////////
 
 function Location(query, data) {
   this.search_query = query;
@@ -54,455 +190,127 @@ function Location(query, data) {
   this.longitude = data.geometry.location.lng;
 }
 
-Location.lookUpLocation = (handler) => {
-  const SQL = `SELECT * FROM locations WHERE search_query=$1;`
-  const values = [handler.query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        handler.cacheHit(results);
-      } else {
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
-
-Location.fetchLocation = (query) => {
-  const URL = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
-
-  return superagent.get(URL)
-    .then(data => {
-      console.log('got location data from google maps API:');
-      if (!data.body.results.length) throw 'No Data';
-      else {
-        let location = new Location(query, data.body.results[0]);
-        location.save();
-
-        return location;
-      }
-    });
-}
 Location.prototype.save = function () {
   let SQL = `INSERT INTO locations(search_query, formatted_query, latitude, longitude) VALUES($1, $2, $3, $4)`;
   let values = Object.values(this);
   client.query(SQL,values)
     .then(() => {
-      // console.log('insert',result)
+      console.log('location was saved to DB', values)
     })
-    .catch(e => console.error(e.stack));
+    .catch(error => console.error(error.stack));
 }
-
-
-
-
-
 
 /////weather////////////////
 
-
-/**
- * getWeather is an API handler for fetching weather related to a location search string
- * request.query.data is a full location object (minus the location_id)
- * 
- * @param {object} request 
- * @param {object} response 
- */
-function getWeather(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Weather.fetchWeather(request.query.data)
-        .then(data => response.send(data));
-    }
-  }
-
-  Weather.lookUpWeather(handler);
-}
-
-function Weather (day, search_query) {
-  this.forecast = day.summary;
-  this.time = new Date(day.time * 1000).toString().slice(0,15);
+function Weather (query, data) {
+  this.forecast = data.summary;
+  this.time = new Date(data.time * 1000).toString().slice(0,15);
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Weather.prototype.save = function () {
   let SQL = `INSERT INTO weathers(forecast, time, created_at, search_query) VALUES($1, $2, $3, $4)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(()=>console.log('weather saved'))
+    .catch(err => console.error('weather save error',err))
 }
 
-Weather.fetchWeather = (locationObject) => {
-  const URL = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${locationObject.latitude},${locationObject.longitude}`;
+////YELP/////////////
 
-  return superagent.get(URL)
-    .then(data => {
-      if (!data.body.daily.data.length) throw 'No Data';
-      else {
-        let weatherData = data.body.daily.data.map( day => {
-          let weather = new Weather(day, locationObject.search_query);
-          weather.save();
-          return weather;
-        })
-        return weatherData;
-      }
-    });
-}
-
-
-
-Weather.lookUpWeather = (handler) => {
-  const SQL = `SELECT * FROM weathers WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got weather data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got weather data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
-
-////YELP
-
-function getRestaurants(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Restaurants.fetchRestaurants(request.query.data)
-        .then(data => response.send(data));
-    }
-  }
-
-  Restaurants.lookUpRestaurants(handler);
-}
-
-function Restaurants(restaurants, search_query) {
-  this.name = restaurants.name;
-  this.image_url = restaurants.image_url;
-  this.price = restaurants.price;
-  this.rating = restaurants.rating;
-  this.url = restaurants.url;
+function Restaurants(query, data) {
+  this.name = data.name;
+  this.image_url = data.image_url;
+  this.price = data.price;
+  this.rating = data.rating;
+  this.url = data.url;
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Restaurants.prototype.save = function () {
   let SQL = `INSERT INTO restaurants(name, image_url, price, rating, url, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(data=>console.log('restaurant', data.command))
+    .catch(err => console.error('restaurant save error',err));
 }
 
-Restaurants.fetchRestaurants = (locationObject) => {
-  
-  const URL = `https://api.yelp.com/v3/businesses/search?latitude=${locationObject.latitude}&longitude=${locationObject.longitude}&categories=restaurants`;
-
-  return superagent.get(URL)
-    .set( 'Authorization', `Bearer ${process.env.YELP_API_KEY}`)
-    .then( data => {
-      if (!data.body.businesses.length) throw 'No Data';
-      else {
-        let restaurantsData = data.body.businesses.map( item => {
-          let restaurants = new Restaurants(item, locationObject.search_query);
-          restaurants.save();
-          return restaurants;
-        })
-        return restaurantsData;
-      }
-    })
-    .catch(error => handleError(error));
-}
-
-Restaurants.lookUpRestaurants = (handler) => {
-  const SQL = `SELECT * FROM restaurants WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got restaurants data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got restaurants data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
 // //////////MOVIES///////////////
 
-function getMovies(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Movies.fetchMovies(request.query.data)
-        .then(data => response.send(data))
-        .catch(console.error);
-    }
-  }
-
-  Movies.lookUpMovies(handler);
-}
-
-function Movies(movie, search_query) {
-  this.title = movie.title;
-  this.overview = movie.overview;
-  this.average_votes = movie.vote_average;
-  this.total_votes = movie.vote_count;
-  this.image_url = 'https://image.tmdb.org/t/p/w500/'+movie.poster_path;
-  this.popularity = movie.popularity;
-  this.released_on = movie.release_date;
+function Movies(query, data) {
+  this.title = data.title;
+  this.overview = data.overview;
+  this.average_votes = data.vote_average;
+  this.total_votes = data.vote_count;
+  this.image_url = 'https://image.tmdb.org/t/p/w500/'+data.poster_path;
+  this.popularity = data.popularity;
+  this.released_on = data.release_date;
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Movies.prototype.save = function () {
   let SQL = `INSERT INTO movies(title, overview, average_votes, total_votes, image_url, popularity, released_on, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
-}
-
-Movies.fetchMovies = (locationObject) => {
-  const URL = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.MOVIES_API_KEY}&query=${locationObject.search_query}`;
-  console.log('the URL is ' + URL);
-  return superagent.get(URL)
-    .then( data => {
-      // console.log(data.body);
-      if (!data.body) throw 'No Data';
-      else {
-        let movieData = data.body.results.map( item => {
-          let movies = new Movies(item, locationObject.search_query);
-          movies.save();
-          return movies;
-        })
-        return movieData;
-      }
-    })
-}
-
-Movies.lookUpMovies = (handler) => {
-  const SQL = `SELECT * FROM movies WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got Movies data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got Movies data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
+  client.query(SQL,values)
+    .then(data=>console.log('movie saved', data.command))
+    .catch(err => console.error('movie save error',err));
 }
 
 
 ////////////////Meet Up///////////////////
 
-
-function getMeetups(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Meetups.fetchMeetups(request.query.data)
-        .then(data => response.send(data))
-        .catch(console.error);
-    }
-  }
-
-  Meetups.lookUpMeetups(handler);
-}
-
-function Meetups(meetup, search_query) {
-  this.link = meetup.link;
-  this.name = meetup.name;
-  this.creation_date = new Date(meetup.created);
-  this.host = meetup.organizer.name;
+function Meetups(query, data) {
+  this.link = data.link;
+  this.name = data.name;
+  this.creation_date = new Date(data.created);
+  this.host = data.organizer.name;
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Meetups.prototype.save = function () {
   let SQL = `INSERT INTO meetups(link, name, creation_date, host, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6)`;
   let values = Object.values(this);
 
-  client.query(SQL,values);
-}
-
-Meetups.fetchMeetups = (locationObject) => {
-  const URL = `https://api.meetup.com/find/groups?key=${process.env.MEETUPS_API_KEY}&query=${locationObject.search_query}&radius=1`
-  console.log('the URL is ' + URL);
-  return superagent.get(URL)
-    .then( data => {
-      if (!data.body) throw 'No Data';
-      else {
-        let movieMeetups = data.body.map( item => {
-          let meetup = new Meetups(item, locationObject.search_query);
-          meetup.save();
-          return meetup;
-        })
-        return movieMeetups;
-      }
-    })
-}
-
-Meetups.lookUpMeetups = (handler) => {
-  const SQL = `SELECT * FROM meetups WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got Meetups data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got Meetups data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
+  client.query(SQL,values)
+    .then(data=>console.log('meetup saved', data.command))
+    .catch(err => console.error('meetup save error',err));
 }
 
 ////////////TRAILS///////////////
 
-
-function getTrails(request, response) {
-  const handler = {
-    search_query: request.query.data.search_query,
-
-    cacheHit: (result) => {
-      response.send(result.rows);
-    },
-
-    cacheMiss: () => {
-      Trails.fetchTrails(request.query.data)
-        .then(data => response.send(data))
-        .catch(console.error);
-    }
-  }
-
-  Trails.lookUpTrails(handler);
-}
-
-function Trails(trail, search_query) {
-  this.name = trail.name;
-  this.location = trail.location;
-  this.length = trail.length;
-  this.stars = trail.stars;
-  this.star_votes = trail.starVotes;
-  this.summary = trail.summary;
-  this.trail_url = trail.url;
-  this.conditions = trail.conditionDetails;
-  this.condition_date = trail.conditionDate.slice(0, 10);
-  this.condition_time = trail.conditionDate.slice(11,19);
+function Trails(query, data) {
+  this.name = data.name;
+  this.location = data.location;
+  this.length = data.length;
+  this.stars = data.stars;
+  this.star_votes = data.starVotes;
+  this.summary = data.summary;
+  this.trail_url = data.url;
+  this.conditions = data.conditionDetails;
+  this.condition_date = data.conditionDate.slice(0, 10);
+  this.condition_time = data.conditionDate.slice(11,19);
   this.created_at = new Date().getTime();
-  this.search_query = search_query;
+  this.search_query = query;
 }
 
 Trails.prototype.save = function () {
-  let SQL = `INSERT INTO trails(name, location, length, stars, star_votes, summary, trail_url, conditions, condition_date, condition_time, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`;
+  let SQL = `INSERT INTO trails(name, location, length, stars, star_votes, summary, trail_url, conditions, condition_date, condition_time, created_at, search_query) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`;
   let values = Object.values(this);
-
-  client.query(SQL,values);
+  client.query(SQL,values)
+    .then(data=>console.log('trail saved', data.command))
+    .catch(err => console.error('trail save error',err));
 }
 
-Trails.fetchTrails = (locationObject) => {
-  const URL = `https://www.hikingproject.com/data/get-trails?lat=${locationObject.latitude}&lon=${locationObject.longitude}&key=${process.env.TRAILS_API_KEY}`
-  console.log('the URL is ' + URL);
-  return superagent.get(URL)
-    .then( data => {
-      if (!data.body) throw 'No Data';
-      else {
-        let trailData = data.trails.map( item => {
-          let trails = new Meetups(item, locationObject.search_query);
-          trails.save();
-          return trails;
-        })
-        return trailData;
-      }
-    })
-}
-
-Trails.lookUpTrails = (handler) => {
-  const SQL = `SELECT * FROM trails WHERE search_query=$1;`
-  const values = [handler.search_query];
-
-  return client.query(SQL, values)
-    .then((results) => {
-      if (results.rowCount > 0) {
-        console.log('got Trails data from database');
-        handler.cacheHit(results);
-      } else {
-        console.log('got Trails data from API');
-        handler.cacheMiss();
-      }
-    })
-    .catch(console.error);
-}
-
-
-// [
-//   {
-//     "name": "Rattlesnake Ledge",
-//     "location": "Riverbend, Washington",
-//     "length": "4.3",
-//     "stars": "4.4",
-//     "star_votes": "84",
-//     "summary": "An extremely popular out-and-back hike to the viewpoint on Rattlesnake Ledge.",
-//     "trail_url": "https://www.hikingproject.com/trail/7021679/rattlesnake-ledge",
-//     "conditions": "Dry: The trail is clearly marked and well maintained.",
-//     "condition_date": "2018-07-21",
-//     "condition_time": "0:00:00 "
-//   },
-//   {
-//     "name": "Mt. Si",
-//     "location": "Tanner, Washington",
-//     "length": "6.6",
-//     "stars": "4.4",
-//     "star_votes": "72",
-//     "summary": "A steep, well-maintained trail takes you atop Mt. Si with outrageous views of Puget Sound.",
-//     "trail_url": "https://www.hikingproject.com/trail/7001016/mt-si",
-//     "conditions": "Dry",
-//     "condition_date": "2018-07-22",
-//     "condition_time": "0:17:22 "
-//   },
-//   ...
-// ]
-
-//////////errors
-function handleError(error,response) {
-  console.log('error',error);
+//////////errors////////////////////
+function handleError(name, error, response) {
+  console.log(name, 'error',error);
   if(response){
     response.status(500).send('sorry there is no data')
   }

@@ -3,6 +3,7 @@ DROP TABLE IF EXISTS locations;
 DROP TABLE IF EXISTS restaurants;
 DROP TABLE IF EXISTS movies;
 DROP TABLE IF EXISTS meetups;
+DROP TABLE IF EXISTS trails;
 
 CREATE TABLE IF NOT EXISTS locations(
     id SERIAL PRIMARY KEY,
@@ -61,12 +62,12 @@ CREATE TABLE IF NOT EXISTS trails (
     location VARCHAR(255),
     length FLOAT,
     stars FLOAT,
-    star_votes INT,
+    star_votes FLOAT,
     summary TEXT,
     trail_url VARCHAR(255),
     conditions VARCHAR(255),
-    condition_date BIGINT,
-    condition_time BIGINT,
+    condition_date VARCHAR(255),
+    condition_time VARCHAR(255),
     created_at BIGINT,
     search_query VARCHAR(255)
 );
