@@ -1,13 +1,11 @@
 'use strict';
 
+//const cors = require('cors');
 const express = require('express');
-const cors = require('cors');
+const pg = require('pg');
 const superagent =require('superagent');
 require('dotenv').config();
-const pg = require('pg');
 console.log(process.env.DATABASE_URL);
-
-
 
 const client = new pg.Client(process.env.DATABASE_URL);
 client.connect();
@@ -18,10 +16,7 @@ const PORT = process.env.PORT || 3000;
 const app = express();
 app.listen(PORT, () => console.log(`App is up on http://localhost:${PORT}`));
 
-app.use(cors());
-
-
-
+//app.use(cors());
 
 app.get('/location', getHandlerFunction('locations'));
 app.get('/weather', getHandlerFunction('weathers'));
@@ -59,36 +54,34 @@ const cacheForMinutes = {
   trails: 60,
   restaurants: 60*60*24,
   weathers: 60
-}
+};
+
 function lookupInfoInDatabase(name, handler) {
   const SQL = `SELECT * FROM ${name} WHERE search_query=$1;`
   const values = [handler.query];
 
   return client.query(SQL, values)
-
     .then(result => {
-      if (result.rowCount > 0) {
-        console.log(`${name} data existed in DATABASE`);
-
-        if (name !== 'locations'){
-          let minutesOld = (new Date().getTime() - result.rows[0].created_at) / (1000*60);
-
-          if (
-            result.rowCount > 0 &&
-            (!cacheForMinutes[name] || minutesOld > cacheForMinutes[name])
-          ) {
-            console.log(`${name} Data was too old`);
-            deleteEntryByQuery(name, handler.search_query)
-            handler.cacheMiss();
-          } else {
-            handler.cacheHit(result);
-          }
-        } else {
-          handler.cacheHit(result);
-        }
-      } else {
-        handler.cacheMiss();
+      if(!result.rowCount){ // if it is not in the db, get the API
+        return handler.cacheMiss();
       }
+      console.log(`${name} data existed in DATABASE`);
+
+      if (name === 'locations'){ // locations never expire
+        return handler.cacheHit(result);
+      }
+
+      let minutesOld = (new Date().getTime() - result.rows[0].created_at) / (1000*60);
+      let dataIsTooOld = !cacheForMinutes[name] || minutesOld > cacheForMinutes[name];
+
+      if (dataIsTooOld) {
+        console.log(`${name} Data was too old`);
+        deleteEntryByQuery(name, handler.search_query)
+        return handler.cacheMiss();
+      }
+      
+      return handler.cacheHit(result);
+  
     })
     .catch(error => handleError(`look up ${name}`, error));
 }
@@ -315,4 +308,3 @@ function handleError(name, error, response) {
     response.status(500).send('sorry there is no data')
   }
 }
-
